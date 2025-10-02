@@ -109,6 +109,18 @@ class Settings:
                 "show_preview": True,
                 "on_demand_thumbs": True,
             },
+            "Concurrency": {
+                "worker_pool_type": "adaptive",  # adaptive | fixed | auto
+                "max_concurrent_io": None,  # None = use thread_cap, or specific limit
+                "back_off_enabled": True,
+                "interaction_threshold": 3,  # interactions per second to trigger back-off
+                "interaction_window": 1.0,   # time window for interaction counting (seconds)
+                "back_off_duration": 2.0,    # how long to back off (seconds)
+                "batch_size_scanning": 100,  # files per batch for scanning operations
+                "batch_size_hashing": 50,    # files per batch for hashing operations
+                "batch_size_thumbnails": 25, # files per batch for thumbnail generation
+                "priority_boost_ui": True,   # boost priority for UI-related tasks
+            },
         }
 
         # runtime state
