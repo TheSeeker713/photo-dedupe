@@ -1,0 +1,15 @@
+PySide6
+Pillow
+pillow-heif
+imagehash
+opencv-python
+piexif
+xxhash
+blake3
+send2trash
+platformdirs
+loguru
+tqdm
+
+# Optional: If you prefer exifread instead of piexif, replace/add it here
+# exifread

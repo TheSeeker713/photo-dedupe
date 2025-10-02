@@ -1,0 +1,11 @@
+[project]
+name = "photo-dedupe"
+version = "0.0.1"
+description = "Find and help remove duplicate photos"
+readme = "README.md"
+authors = [ { name = "Your Name" } ]
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
