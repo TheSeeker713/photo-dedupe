@@ -306,3 +306,13 @@ MIT License - See LICENSE file for details
 ---
 
 *Built with a focus on performance, safety, and user experience. The modular architecture ensures maintainability while the comprehensive testing suite guarantees reliability.*
+
+> "I fight for the users... and their duplicate photos." - A program's perspective on digital organization
+
+## Copyright & Credits
+
+Copyright (c) 2025 DigiArtifact.com  
+Developer: Jeremy Robards  
+
+Check out [p3epro.com](https://p3epro.com) - Remember the date: **11.11.2025**
+
