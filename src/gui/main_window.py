@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
+from datetime import datetime
 
 try:
     from PySide6.QtWidgets import (
@@ -47,6 +48,10 @@ try:
     from store.cache import CacheManager
     from core.diagnostics import DiagnosticsPanel, setup_logging
     from ops.grouping import DuplicateGrouper
+    from ops.delete_manager import (
+        DeleteManager, DeleteMethod, DeleteConfirmationDialog, 
+        DeleteProgressDialog
+    )
     from gui.selection_model import (
         SelectionModel, KeyboardShortcutManager, BulkActionManager,
         FileSelection, GroupSelection
@@ -412,6 +417,11 @@ class MainWindow(QMainWindow):
         self.keyboard_manager = None  # Will be initialized after UI
         self.bulk_action_manager = BulkActionManager(self.selection_model)
         
+        # Delete manager
+        self.delete_manager = DeleteManager()
+        self.delete_method = DeleteMethod.RECYCLE_BIN  # Default method
+        self.setup_delete_manager()
+        
         self.init_ui()
         self.init_data()
         self.load_sample_data()
@@ -504,6 +514,26 @@ class MainWindow(QMainWindow):
         self.delete_action.triggered.connect(self.delete_selected)
         self.delete_action.setEnabled(False)
         toolbar.addAction(self.delete_action)
+        
+        # Undo Delete
+        self.undo_delete_action = QAction("↶ Undo Delete", self)
+        self.undo_delete_action.triggered.connect(self.undo_delete)
+        self.undo_delete_action.setEnabled(False)
+        toolbar.addAction(self.undo_delete_action)
+        
+        # Open Recycle Bin
+        self.open_recycle_action = QAction("🗂️ Open Recycle Bin", self)
+        self.open_recycle_action.triggered.connect(self.open_recycle_bin)
+        toolbar.addAction(self.open_recycle_action)
+        
+        toolbar.addSeparator()
+        
+        # Delete method selection
+        toolbar.addWidget(QLabel("Delete Method:"))
+        self.delete_method_combo = QComboBox()
+        self.delete_method_combo.addItems(["Recycle Bin", "Quarantine", "Permanent"])
+        self.delete_method_combo.currentTextChanged.connect(self.on_delete_method_changed)
+        toolbar.addWidget(self.delete_method_combo)
         
         toolbar.addSeparator()
         
@@ -910,6 +940,9 @@ class MainWindow(QMainWindow):
             total_selected = max(id_selected, path_selected)  # Use the larger count
             self.selection_info_label.setText(f"Selected: {total_selected} files")
             
+        # Update overall UI state including delete buttons
+        self.update_ui_state()
+            
     def update_file_checkboxes(self):
         """Update checkbox states to match selection model."""
         if not hasattr(self, 'candidates_grid') or not self.candidates_grid.file_widgets:
@@ -928,6 +961,216 @@ class MainWindow(QMainWindow):
         
         # Update checkboxes after loading
         self.update_file_checkboxes()
+        
+    def setup_delete_manager(self):
+        """Setup delete manager with signal connections."""
+        if not self.delete_manager:
+            return
+            
+        # Connect delete manager signals
+        self.delete_manager.delete_started.connect(self.on_delete_started)
+        self.delete_manager.delete_progress.connect(self.on_delete_progress)
+        self.delete_manager.delete_completed.connect(self.on_delete_completed)
+        self.delete_manager.delete_failed.connect(self.on_delete_failed)
+        self.delete_manager.undo_completed.connect(self.on_undo_completed)
+        self.delete_manager.undo_failed.connect(self.on_undo_failed)
+        
+    def on_delete_method_changed(self, method_text: str):
+        """Handle delete method combo box changes."""
+        method_map = {
+            "Recycle Bin": DeleteMethod.RECYCLE_BIN,
+            "Quarantine": DeleteMethod.QUARANTINE,
+            "Permanent": DeleteMethod.PERMANENT
+        }
+        self.delete_method = method_map.get(method_text, DeleteMethod.RECYCLE_BIN)
+        
+    def delete_selected(self):
+        """Handle delete selected action with confirmation dialog."""
+        if not self.selection_model or not self.delete_manager:
+            QMessageBox.warning(self, "Error", "Delete system not available")
+            return
+            
+        # Get selected files
+        selected_files = []
+        
+        # Check both ID-based and path-based selections
+        selected_ids = self.selection_model.get_selected_file_ids()
+        selected_paths = list(self.selection_model.selected_files)
+        
+        # Add ID-based selections
+        for file_id in selected_ids:
+            file_sel = self.selection_model.file_selections.get(file_id)
+            if file_sel:
+                selected_files.append({
+                    'path': file_sel.file_path,
+                    'size': file_sel.file_size,
+                    'is_safe': file_sel.is_safe_duplicate
+                })
+                
+        # Add path-based selections (for demo/testing)
+        for file_path in selected_paths:
+            if isinstance(file_path, str) and file_path not in [f['path'] for f in selected_files]:
+                # Estimate file size for demo files
+                try:
+                    if Path(file_path).exists():
+                        size = Path(file_path).stat().st_size
+                    else:
+                        size = 1024 * 1024  # Default 1MB for demo
+                except:
+                    size = 1024 * 1024
+                    
+                selected_files.append({
+                    'path': file_path,
+                    'size': size,
+                    'is_safe': True
+                })
+        
+        if not selected_files:
+            QMessageBox.information(self, "No Selection", "No files selected for deletion")
+            return
+            
+        # Show confirmation dialog
+        confirmation = DeleteConfirmationDialog(selected_files, self.delete_method, self)
+        
+        if confirmation.exec() and confirmation.confirmed:
+            # Perform deletion
+            file_paths = [f['path'] for f in selected_files]
+            description = f"Delete {len(file_paths)} selected files"
+            
+            try:
+                # Show progress dialog
+                self.progress_dialog = DeleteProgressDialog(self)
+                self.progress_dialog.show()
+                
+                # Start deletion
+                batch = self.delete_manager.delete_files(file_paths, self.delete_method, description)
+                
+                # Close progress dialog
+                if hasattr(self, 'progress_dialog'):
+                    self.progress_dialog.close()
+                    
+                # Clear selections after successful deletion
+                self.selection_model.clear_all_selections()
+                self.update_selection_ui()
+                self.update_file_checkboxes()
+                
+            except Exception as e:
+                if hasattr(self, 'progress_dialog'):
+                    self.progress_dialog.close()
+                QMessageBox.critical(self, "Delete Error", f"Failed to delete files: {str(e)}")
+                
+    def undo_delete(self):
+        """Undo the last delete operation."""
+        if not self.delete_manager or not self.delete_manager.can_undo():
+            QMessageBox.information(self, "Undo", "No delete operations to undo")
+            return
+            
+        last_batch = self.delete_manager.get_last_batch()
+        if not last_batch:
+            return
+            
+        # Confirm undo
+        reply = QMessageBox.question(
+            self, "Undo Delete",
+            f"Undo deletion of {last_batch.file_count} files ({last_batch.size_mb:.1f} MB)?\\n\\n"
+            f"Method: {last_batch.delete_method.value.replace('_', ' ').title()}\\n"
+            f"Time: {datetime.fromtimestamp(last_batch.timestamp).strftime('%Y-%m-%d %H:%M:%S')}",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                success = self.delete_manager.undo_last_batch()
+                if success:
+                    QMessageBox.information(
+                        self, "Undo Complete", 
+                        f"Successfully restored files from the last delete operation"
+                    )
+                else:
+                    QMessageBox.warning(
+                        self, "Undo Failed",
+                        "Could not restore all files. Check the console for details."
+                    )
+            except Exception as e:
+                QMessageBox.critical(self, "Undo Error", f"Failed to undo delete: {str(e)}")
+                
+    def open_recycle_bin(self):
+        """Open the system recycle bin or quarantine folder."""
+        if not self.delete_manager:
+            return
+            
+        try:
+            # If last batch was quarantine, open that folder
+            last_batch = self.delete_manager.get_last_batch()
+            if last_batch and last_batch.delete_method == DeleteMethod.QUARANTINE:
+                self.delete_manager.open_quarantine_dir(last_batch)
+            else:
+                self.delete_manager.open_recycle_bin()
+        except Exception as e:
+            QMessageBox.warning(self, "Open Folder", f"Could not open folder: {str(e)}")
+            
+    def on_delete_started(self, total_files: int):
+        """Handle delete operation start."""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.update_progress(0, total_files)
+            
+    def on_delete_progress(self, current: int, current_file: str):
+        """Handle delete progress updates."""
+        if hasattr(self, 'progress_dialog'):
+            # Get total from progress bar max (set in on_delete_started)
+            total = getattr(self.progress_dialog.progress_bar, 'maximum', lambda: current)()
+            self.progress_dialog.update_progress(current, total, current_file)
+            QApplication.processEvents()  # Keep UI responsive
+            
+    def on_delete_completed(self, batch):
+        """Handle delete operation completion."""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+            
+        # Update undo button state
+        self.undo_delete_action.setEnabled(self.delete_manager.can_undo())
+        
+        # Show completion message
+        QMessageBox.information(
+            self, "Delete Complete",
+            f"Successfully deleted {batch.file_count} files ({batch.size_mb:.1f} MB)\\n\\n"
+            f"Method: {batch.delete_method.value.replace('_', ' ').title()}"
+        )
+        
+    def on_delete_failed(self, file_path: str, error_message: str):
+        """Handle individual file delete failures."""
+        print(f"Failed to delete {file_path}: {error_message}")
+        
+    def on_undo_completed(self, batch):
+        """Handle undo operation completion."""
+        self.undo_delete_action.setEnabled(self.delete_manager.can_undo())
+        
+    def on_undo_failed(self, error_message: str):
+        """Handle undo operation failures."""
+        QMessageBox.warning(self, "Undo Failed", f"Undo operation failed: {error_message}")
+        
+    def update_ui_state(self):
+        """Update UI state based on current data and selections."""
+        # Update delete button state
+        has_selection = (
+            self.selection_model and 
+            (len(self.selection_model.get_selected_file_ids()) > 0 or 
+             len(self.selection_model.selected_files) > 0)
+        )
+        self.delete_action.setEnabled(has_selection)
+        
+        # Update undo button state
+        if self.delete_manager:
+            self.undo_delete_action.setEnabled(self.delete_manager.can_undo())
+            
+        # Update delete method combo based on availability
+        if hasattr(self, 'delete_method_combo'):
+            if not self.delete_manager.can_use_recycle_bin():
+                # Disable recycle bin option if send2trash not available
+                for i in range(self.delete_method_combo.count()):
+                    if self.delete_method_combo.itemText(i) == "Recycle Bin":
+                        self.delete_method_combo.setItemData(i, False, Qt.UserRole - 1)
+                        break
 
 
 def main():
