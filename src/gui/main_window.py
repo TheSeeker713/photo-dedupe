@@ -47,6 +47,10 @@ try:
     from store.cache import CacheManager
     from core.diagnostics import DiagnosticsPanel, setup_logging
     from ops.grouping import DuplicateGrouper
+    from gui.selection_model import (
+        SelectionModel, KeyboardShortcutManager, BulkActionManager,
+        FileSelection, GroupSelection
+    )
 except ImportError:
     # Fallback for development
     Settings = None
@@ -317,6 +321,7 @@ class CandidateGridWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.files_data = []
+        self.file_widgets = []  # Store references to file widgets with checkboxes
         self.init_ui()
         
     def init_ui(self):
@@ -343,12 +348,25 @@ class CandidateGridWidget(QWidget):
             self.grid_layout.itemAt(i).widget().setParent(None)
             
         self.files_data = files
+        self.file_widgets.clear()  # Clear previous widgets
         
         # Add files to grid
         cols = 3  # Number of columns
         for i, file_info in enumerate(files):
             row = i // cols
             col = i % cols
+            
+            # Create container widget for checkbox + preview
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(2, 2, 2, 2)
+            
+            # Selection checkbox
+            checkbox = QCheckBox()
+            checkbox.stateChanged.connect(
+                lambda state, path=file_info.path: self.parent().parent().parent().on_file_selection_changed(path, state == 2)
+            )
+            container_layout.addWidget(checkbox)
             
             # Create preview widget for this file
             preview = FilePreviewWidget()
@@ -363,7 +381,14 @@ class CandidateGridWidget(QWidget):
             else:
                 preview.setStyleSheet("border: 2px solid orange;")
                 
-            self.grid_layout.addWidget(preview, row, col)
+            container_layout.addWidget(preview)
+            
+            # Store references for selection management
+            container.checkbox = checkbox
+            container.file_path = file_info.path
+            self.file_widgets.append(container)
+                
+            self.grid_layout.addWidget(container, row, col)
 
 
 class MainWindow(QMainWindow):
@@ -381,6 +406,11 @@ class MainWindow(QMainWindow):
         # Sample data for demonstration
         self.sample_groups = []
         self.sample_files = {}
+        
+        # Selection model and managers
+        self.selection_model = SelectionModel()
+        self.keyboard_manager = None  # Will be initialized after UI
+        self.bulk_action_manager = BulkActionManager(self.selection_model)
         
         self.init_ui()
         self.init_data()
@@ -421,6 +451,9 @@ class MainWindow(QMainWindow):
         
         # Update UI state
         self.update_ui_state()
+        
+        # Initialize keyboard shortcuts after UI is ready
+        self.setup_keyboard_shortcuts()
         
     def create_toolbar(self):
         """Create the top toolbar."""
@@ -478,6 +511,31 @@ class MainWindow(QMainWindow):
         self.export_action = QAction("📊 Export Report", self)
         self.export_action.triggered.connect(self.export_report)
         toolbar.addAction(self.export_action)
+        
+        toolbar.addSeparator()
+        
+        # Selection controls
+        self.selection_info_label = QLabel("Selected: 0 files")
+        toolbar.addWidget(self.selection_info_label)
+        
+        toolbar.addSeparator()
+        
+        # Bulk action buttons
+        self.select_all_safe_action = QAction("✅ Select All Safe", self)
+        self.select_all_safe_action.triggered.connect(self.select_all_safe)
+        toolbar.addAction(self.select_all_safe_action)
+        
+        self.select_all_duplicates_action = QAction("🔄 Select All Duplicates", self)
+        self.select_all_duplicates_action.triggered.connect(self.select_all_duplicates)
+        toolbar.addAction(self.select_all_duplicates_action)
+        
+        self.clear_selection_action = QAction("❌ Clear Selection", self)
+        self.clear_selection_action.triggered.connect(self.clear_selection)
+        toolbar.addAction(self.clear_selection_action)
+        
+        self.export_selection_action = QAction("💾 Export Selection", self)
+        self.export_selection_action.triggered.connect(self.export_selection)
+        toolbar.addAction(self.export_selection_action)
         
         toolbar.addSeparator()
         
@@ -743,6 +801,133 @@ class MainWindow(QMainWindow):
         """Handle open settings action."""
         # TODO: Implement settings dialog
         QMessageBox.information(self, "Settings", "Settings dialog (Not implemented yet)")
+        
+    def setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts for selection operations."""
+        if self.selection_model:
+            self.keyboard_manager = KeyboardShortcutManager(self, self.selection_model)
+            
+            # Connect keyboard shortcuts to our handlers
+            self.keyboard_manager.toggle_selection.connect(self.handle_toggle_selection)
+            self.keyboard_manager.open_compare.connect(self.handle_open_compare)
+            self.keyboard_manager.delete_selected.connect(self.handle_delete_selected)
+            self.keyboard_manager.undo_action.connect(self.handle_undo)
+            self.keyboard_manager.export_selection.connect(self.export_selection)
+            
+    def handle_toggle_selection(self, file_path: str):
+        """Handle Space key toggle selection."""
+        current_selection = self.selection_model.is_file_selected_by_path(file_path)
+        self.selection_model.set_file_selection_by_path(file_path, not current_selection)
+        self.update_selection_ui()
+        
+    def handle_open_compare(self, file_path: str):
+        """Handle Enter key open compare."""
+        # Switch to compare tab and show the file
+        self.preview_tabs.setCurrentIndex(1)  # Compare tab
+        # TODO: Load file for comparison
+        
+    def handle_delete_selected(self):
+        """Handle Del key delete selected files."""
+        if self.bulk_action_manager.has_selected_files():
+            self.delete_selected()
+            
+    def handle_undo(self):
+        """Handle Ctrl+Z undo operation."""
+        if self.bulk_action_manager.can_undo():
+            success = self.bulk_action_manager.undo_last_operation()
+            if success:
+                self.update_selection_ui()
+                QMessageBox.information(self, "Undo", "Last operation undone")
+            else:
+                QMessageBox.warning(self, "Undo", "Failed to undo last operation")
+        else:
+            QMessageBox.information(self, "Undo", "No operations to undo")
+            
+    def on_file_selection_changed(self, file_path: str, selected: bool):
+        """Handle file selection checkbox changes."""
+        self.selection_model.set_file_selection_by_path(file_path, selected)
+        self.update_selection_ui()
+        
+    def select_all_safe(self):
+        """Select all files marked as safe to delete."""
+        if not self.sample_groups:
+            return
+            
+        for group in self.sample_groups:
+            for file_data in group['files']:
+                if file_data.get('is_safe_to_delete', False):
+                    self.selection_model.set_file_selection_by_path(file_data['path'], True)
+                    
+        self.update_selection_ui()
+        self.update_file_checkboxes()
+        
+    def select_all_duplicates(self):
+        """Select all duplicate files (non-safe)."""
+        if not self.sample_groups:
+            return
+            
+        for group in self.sample_groups:
+            for file_data in group['files']:
+                if not file_data.get('is_safe_to_delete', False) and len(group['files']) > 1:
+                    self.selection_model.set_file_selection_by_path(file_data['path'], True)
+                    
+        self.update_selection_ui()
+        self.update_file_checkboxes()
+        
+    def clear_selection(self):
+        """Clear all selections."""
+        self.selection_model.clear_all_selections()
+        self.update_selection_ui()
+        self.update_file_checkboxes()
+        
+    def export_selection(self):
+        """Export current selection to file."""
+        if not self.bulk_action_manager.has_selected_files():
+            QMessageBox.information(self, "Export", "No files selected for export")
+            return
+            
+        filename, file_type = QFileDialog.getSaveFileName(
+            self, "Export Selection", "selection.json",
+            "JSON Files (*.json);;CSV Files (*.csv)"
+        )
+        
+        if filename:
+            try:
+                if filename.endswith('.csv'):
+                    self.bulk_action_manager.export_selection_csv(filename)
+                else:
+                    self.bulk_action_manager.export_selection_json(filename)
+                QMessageBox.information(self, "Export", f"Selection exported to {filename}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export selection: {str(e)}")
+                
+    def update_selection_ui(self):
+        """Update the selection information in the UI."""
+        if self.selection_model:
+            # Count both ID-based and path-based selections
+            id_selected = len(self.selection_model.get_selected_file_ids())
+            path_selected = len(self.selection_model.selected_files)
+            total_selected = max(id_selected, path_selected)  # Use the larger count
+            self.selection_info_label.setText(f"Selected: {total_selected} files")
+            
+    def update_file_checkboxes(self):
+        """Update checkbox states to match selection model."""
+        if not hasattr(self, 'candidates_grid') or not self.candidates_grid.file_widgets:
+            return
+            
+        for widget in self.candidates_grid.file_widgets:
+            if hasattr(widget, 'checkbox') and hasattr(widget, 'file_path'):
+                is_selected = self.selection_model.is_file_selected_by_path(widget.file_path)
+                widget.checkbox.setChecked(is_selected)
+                
+    def load_group_files(self, group_id: int):
+        """Load files for a specific group and update selection state."""
+        # Call original method
+        if hasattr(self, '_original_load_group_files'):
+            self._original_load_group_files(group_id)
+        
+        # Update checkboxes after loading
+        self.update_file_checkboxes()
 
 
 def main():
