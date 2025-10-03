@@ -44,6 +44,13 @@ class ThumbnailGenerator:
         "Accurate": 320,     # 320px longest side
     }
     
+    # Decode size presets for Ultra-Lite optimization (Step 21)
+    DECODE_SIZE_PRESETS = {
+        "Ultra-Lite": 128,   # 128px decode size for efficiency
+        "Balanced": 256,     # 256px decode size
+        "Accurate": 320,     # 320px decode size
+    }
+    
     # Supported input formats
     SUPPORTED_FORMATS = {
         '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'
@@ -82,10 +89,28 @@ class ThumbnailGenerator:
         performance_config = settings._data.get("Performance", {})
         current_preset = performance_config.get("current_preset", "Balanced")
         self.target_size = self.SIZE_PRESETS.get(current_preset, self.SIZE_PRESETS["Balanced"])
+        self.decode_size = self.DECODE_SIZE_PRESETS.get(current_preset, self.DECODE_SIZE_PRESETS["Balanced"])
+        
+        # Check if Ultra-Lite mode is active for format restrictions
+        self.is_ultra_lite = current_preset == "Ultra-Lite"
+        
+        # Ultra-Lite RAW/TIFF formats to skip
+        self.raw_extensions = {'.cr2', '.nef', '.arw', '.dng', '.rw2', '.orf', '.pef', '.srw'}
+        self.tiff_extensions = {'.tif', '.tiff'}
         
         # Quality settings
         self.webp_quality = 85
         self.png_compress_level = 6
+    
+    def should_skip_format(self, file_path: Path) -> bool:
+        """Check if file format should be skipped in Ultra-Lite mode."""
+        if not self.is_ultra_lite:
+            return False
+        
+        file_ext = file_path.suffix.lower()
+        should_skip = file_ext in self.raw_extensions or file_ext in self.tiff_extensions
+        
+        return should_skip
     
     def _get_hashed_filename(self, file_path: Path, size: int) -> str:
         """Generate hashed filename for thumbnail to avoid exposing original names."""
@@ -117,9 +142,13 @@ class ThumbnailGenerator:
         return thumb_w, thumb_h
     
     def _create_thumbnail(self, image_path: Path, output_path: Path, target_size: int) -> Optional[Tuple[int, int]]:
-        """Create a single thumbnail with orientation correction."""
+        """Create a single thumbnail with orientation correction and Ultra-Lite optimization."""
         if not PIL_AVAILABLE:
             print(f"Warning: PIL not available, cannot create thumbnail for {image_path}")
+            return None
+        
+        # Check if format should be skipped in Ultra-Lite mode
+        if self.should_skip_format(image_path):
             return None
         
         try:
@@ -131,6 +160,18 @@ class ThumbnailGenerator:
                 # Apply orientation correction if needed
                 if exif_data.orientation != 1:
                     img = ExifExtractor.apply_orientation(img)
+                
+                # Ultra-Lite optimization: Pre-scale large images to decode size
+                if self.is_ultra_lite:
+                    original_w, original_h = img.size
+                    max_dimension = max(original_w, original_h)
+                    
+                    # If image is significantly larger than decode size, pre-scale it
+                    if max_dimension > self.decode_size * 2:
+                        decode_w, decode_h = self._calculate_thumbnail_size(
+                            original_w, original_h, self.decode_size * 2
+                        )
+                        img = img.resize((decode_w, decode_h), Image.Resampling.LANCZOS)
                 
                 # Convert to RGB if necessary (handles RGBA, grayscale, etc.)
                 if img.mode not in ('RGB', 'L'):

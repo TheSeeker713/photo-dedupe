@@ -4,7 +4,7 @@ A comprehensive Python-based photo deduplication application with intelligent du
 
 ## 🎯 Project Status: **FEATURE COMPLETE** ✨
 
-**Production-Ready Application** - All major features implemented through Step 20:
+**Production-Ready Application** - All major features implemented through Step 21:
 
 ### ✅ **Core System (Steps 1-13)**
 - **✅ Project Architecture** - Modular structure with comprehensive settings management
@@ -27,7 +27,7 @@ A comprehensive Python-based photo deduplication application with intelligent du
 - **✅ Selection Model** - Advanced file selection with keyboard shortcuts and bulk operations
 - **✅ Delete Manager** - Safe deletion with recycle bin support, undo functionality, and confirmation dialogs
 
-### ✅ **Advanced Features (Step 20+)**
+### ✅ **Advanced Features (Step 21+)**
 - **✅ Reports & Export** - Comprehensive CSV/JSON export with 25+ configurable fields
 - **✅ Professional Settings** - Complete settings dialog with multiple configuration tabs
 - **✅ Secret Easter Egg** - Hidden PacDupe mini-game for curious users! 🎮
@@ -168,6 +168,21 @@ python launch_app.py
 - **Security Options**: Encryption, secure deletion, daily caps for safety
 - **Professional UX**: Dark theme, HiDPI scaling, responsive layout design
 - **Settings Persistence**: JSON-based configuration with automatic backup/restore
+
+### ✅ **Step 20: Cache Cleanup Scheduler**
+- **Automatic Triggers**: App start fast sweep, periodic idle sweep, size cap breach purge
+- **Real-Time Monitoring**: Live cache size, items count, reclaimable space tracking
+- **Background Processing**: Non-blocking cleanup operations with progress reporting
+- **Professional Interface**: Dark theme diagnostics card with manual cleanup controls
+- **Cap Breach Protection**: Automatic purge when 75MB exceeded, drops to 60MB target
+
+### ✅ **Step 21: Low-End Mode Behaviors**
+- **Ultra-Lite Preset**: 2 threads, 512MB RAM, 256MB cache, strict thresholds (≤6)
+- **Battery Saver**: Auto-switch to Ultra-Lite on DC power or <20% battery level
+- **Format Optimization**: Skip RAW/TIFF by default, 128-192px decode optimization
+- **System Priorities**: Below-Normal process priority, Low I/O priority enforcement
+- **Runtime Switching**: Live preset changes with immediate enforcement and validation
+- **Comprehensive Diagnostics**: Real-time monitoring, performance metrics, logging integration
 - **Low-End Mode**: Optimized settings for resource-constrained systems
 - **Easter Egg Integration**: Hidden mini-game accessible from About tab
 
@@ -176,6 +191,10 @@ python launch_app.py
 ### **Comprehensive Test Suite**
 
 ```bash
+# Step 21: Low-End Mode behaviors tests
+python test_step21_acceptance.py                    # Ultra-Lite mode acceptance tests
+python demos/step21_ultra_lite_demo.py              # Interactive Ultra-Lite demo
+
 # Step 20: Cache cleanup scheduler tests
 python test_step20_acceptance.py                    # Cache cleanup acceptance tests
 python demos/step20_cache_cleanup_demo.py           # Interactive cache demo
@@ -418,7 +437,7 @@ The system uses comprehensive JSON-based configuration:
 All components extensively tested with:
 - ✅ Unit tests for individual components
 - ✅ Integration tests for component interaction  
-- ✅ Acceptance tests for user requirements (11/11 passing for Step 20)
+- ✅ Acceptance tests for user requirements (12/12 passing for Step 21)
 - ✅ Performance tests with large photo collections
 - ✅ GUI usability testing and easter egg validation
 - ✅ Export system validation with comprehensive field testing

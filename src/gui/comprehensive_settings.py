@@ -85,7 +85,7 @@ class PerformancePresetManager:
     
     PRESETS = {
         "Ultra-Lite": {
-            "description": "Minimal resource usage for low-end systems",
+            "description": "Minimal resource usage for low-end systems - Step 21 Enhanced",
             "thread_cap": 2,
             "io_throttle": 1.0,
             "memory_cap_mb": 512,
@@ -93,6 +93,16 @@ class PerformancePresetManager:
             "on_demand_thumbs": True,
             "skip_raw_tiff": True,
             "cache_size_cap_mb": 256,
+            # Step 21 Enhanced requirements
+            "thumbnail_decode_size": 128,  # 128-192px decode
+            "thumbnail_max_size": 192,
+            "phash_threshold": 6,  # Strict threshold (≤6)
+            "skip_raw_formats": True,
+            "skip_tiff_formats": True,
+            "process_priority": "below_normal",
+            "io_priority": "low",
+            "animations_enabled": False,
+            "use_perceptual_hash_only": True,  # pHash only for suspected groups
         },
         "Balanced": {
             "description": "Good performance with moderate resource usage",

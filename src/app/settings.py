@@ -59,6 +59,8 @@ class Settings:
                 "include_patterns": ["*.jpg", "*.jpeg", "*.png", "*.heic"],
                 "exclude_patterns": [],
                 "battery_saver_auto_switch": True,
+                "low_battery_threshold": 20,  # Step 21: Auto-switch threshold
+                "animations_enabled": True,  # Step 21: Can be disabled in Ultra-Lite
             },
             "PerformancePresets": {
                 "Ultra-Lite": {

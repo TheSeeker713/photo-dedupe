@@ -175,6 +175,14 @@ class GroupingEngine:
         self.settings = settings
         self.db_manager = DatabaseManager(db_path)
         
+        # Initialize manual override manager
+        try:
+            from ops.manual_override import ManualOverrideManager
+            self.override_manager = ManualOverrideManager(db_path)
+        except Exception as e:
+            logger.warning(f"Failed to initialize manual override manager: {e}")
+            self.override_manager = None
+        
         # Get current performance preset
         perf_config = settings._data.get("Performance", {})
         self.current_preset = perf_config.get("current_preset", "Balanced")
@@ -199,7 +207,9 @@ class GroupingEngine:
             'exact_groups_found': 0,
             'near_groups_found': 0,
             'total_duplicates': 0,
-            'processing_time': 0.0
+            'processing_time': 0.0,
+            'manual_overrides_detected': 0,
+            'conflicts_found': 0
         }
         
         logger.info(f"GroupingEngine initialized: preset={self.current_preset}, "
@@ -264,7 +274,7 @@ class GroupingEngine:
                 confirmed_groups = self._confirm_with_sha256(group_files)
                 for confirmed_files in confirmed_groups:
                     if len(confirmed_files) >= 2:
-                        original_id, duplicate_ids = self._select_original(confirmed_files)
+                        original_id, duplicate_ids, conflict_info = self._select_original(confirmed_files)
                         group = DuplicateGroup(
                             id=f"exact_{group_id_counter}",
                             tier=GroupTier.EXACT,
@@ -281,7 +291,7 @@ class GroupingEngine:
                         group_id_counter += 1
             else:
                 # No SHA256 confirmation - use fast hash only
-                original_id, duplicate_ids = self._select_original(group_files)
+                original_id, duplicate_ids, conflict_info = self._select_original(group_files)
                 group = DuplicateGroup(
                     id=f"exact_{group_id_counter}",
                     tier=GroupTier.EXACT,
@@ -365,7 +375,7 @@ class GroupingEngine:
             # Create group if we have valid candidates
             if valid_candidates:
                 group_files = [record] + valid_candidates
-                original_id, duplicate_ids = self._select_original(group_files)
+                original_id, duplicate_ids, conflict_info = self._select_original(group_files)
                 
                 # Calculate confidence score based on pHash distances
                 min_distance = min(c['min_distance'] for c in similar_files 
@@ -440,20 +450,225 @@ class GroupingEngine:
         time_diff = abs((file1.exif_datetime - file2.exif_datetime).total_seconds())
         return time_diff <= 60
     
-    def _select_original(self, files: List[FileRecord]) -> Tuple[int, List[int]]:
-        """Select original file using deterministic rules."""
+    def _select_original(self, files: List[FileRecord], group_id: Optional[int] = None) -> Tuple[int, List[int], Optional[dict]]:
+        """Select original file using deterministic rules, checking for manual overrides."""
         if len(files) < 2:
-            return files[0].id, []
+            return files[0].id, [], None
         
         # Sort by original selection criteria
         sorted_files = sorted(files, key=self._original_sort_key)
+        auto_original = sorted_files[0]
+        auto_duplicates = [f.id for f in sorted_files[1:]]
         
-        # First file is original, rest are duplicates
-        original = sorted_files[0]
-        duplicates = [f.id for f in sorted_files[1:]]
+        # Check for existing manual override if group_id is provided
+        conflict_info = None
+        final_original_id = auto_original.id
+        final_duplicates = auto_duplicates
         
-        logger.debug(f"Selected original: {original.id} from {len(files)} files")
-        return original.id, duplicates
+        if group_id and self.override_manager:
+            override = self.override_manager.get_override_for_group(group_id)
+            if override and override.is_active:
+                # Apply manual override
+                override_file_id = override.original_file_id
+                
+                # Verify the override file is still in the group
+                override_file = next((f for f in files if f.id == override_file_id), None)
+                if override_file:
+                    # Apply the override
+                    final_original_id = override_file_id
+                    final_duplicates = [f.id for f in files if f.id != override_file_id]
+                    
+                    # Check if override differs from auto selection
+                    if override_file_id != auto_original.id:
+                        conflict_info = {
+                            'group_id': group_id,
+                            'auto_original_id': auto_original.id,
+                            'manual_original_id': override_file_id,
+                            'override_type': override.override_type.value,
+                            'override_reason': override.reason.value,
+                            'created_at': override.created_at,
+                            'notes': override.notes
+                        }
+                        self.stats['conflicts_found'] += 1
+                        logger.info(f"Applied manual override for group {group_id}: "
+                                  f"auto={auto_original.id} -> manual={override_file_id}")
+                else:
+                    # Override file disappeared - deactivate override
+                    logger.warning(f"Manual override file {override_file_id} not found in group {group_id}, "
+                                 f"reverting to automatic selection")
+                    self.override_manager.remove_override(group_id)
+                    self.stats['conflicts_found'] += 1
+        
+        logger.debug(f"Selected original: {final_original_id} from {len(files)} files "
+                    f"(auto: {auto_original.id}, manual override: {conflict_info is not None})")
+        
+        return final_original_id, final_duplicates, conflict_info
+    
+    def check_override_conflicts(self) -> List[dict]:
+        """Check for conflicts between manual overrides and current automatic selection."""
+        if not self.override_manager:
+            return []
+        
+        conflicts = []
+        overrides = self.override_manager.get_all_overrides(active_only=True)
+        
+        for override in overrides:
+            try:
+                # Load all files in this group
+                with self.db_manager.get_connection() as conn:
+                    cursor = conn.execute("""
+                        SELECT f.id, f.path, f.size, f.fast_hash, f.sha256_hash, f.phash,
+                               f.width, f.height, f.exif_datetime, f.status
+                        FROM files f
+                        JOIN group_members gm ON f.id = gm.file_id
+                        WHERE gm.group_id = ? AND f.status = 'active'
+                    """, (override.group_id,))
+                    
+                    file_data = cursor.fetchall()
+                    if not file_data:
+                        continue
+                    
+                    # Convert to FileRecord objects
+                    file_records = []
+                    for row in file_data:
+                        file_format = FileFormat.from_extension(Path(row[1]).suffix)
+                        resolution = (row[6] or 0) * (row[7] or 0)
+                        exif_datetime = datetime.fromisoformat(row[8]) if row[8] else None
+                        
+                        file_record = FileRecord(
+                            id=row[0],
+                            path=row[1],
+                            size=row[2],
+                            fast_hash=row[3],
+                            sha256_hash=row[4],
+                            phash=row[5],
+                            width=row[6],
+                            height=row[7],
+                            resolution=resolution,
+                            exif_datetime=exif_datetime,
+                            file_format=file_format
+                        )
+                        file_records.append(file_record)
+                    
+                    if len(file_records) < 2:
+                        continue
+                    
+                    # Get what automatic selection would choose
+                    auto_original_id, _, _ = self._select_original(file_records)
+                    
+                    # Check if it differs from manual override
+                    if auto_original_id != override.original_file_id:
+                        auto_file = next((f for f in file_records if f.id == auto_original_id), None)
+                        manual_file = next((f for f in file_records if f.id == override.original_file_id), None)
+                        
+                        if auto_file and manual_file:
+                            conflicts.append({
+                                'group_id': override.group_id,
+                                'auto_original_id': auto_original_id,
+                                'auto_original_path': auto_file.path,
+                                'manual_original_id': override.original_file_id,
+                                'manual_original_path': manual_file.path,
+                                'override_type': override.override_type.value,
+                                'override_reason': override.reason.value,
+                                'override_created': override.created_at,
+                                'override_notes': override.notes,
+                                'confidence_score': 0.8  # High confidence in conflict detection
+                            })
+            
+            except Exception as e:
+                logger.error(f"Error checking override conflict for group {override.group_id}: {e}")
+                continue
+        
+        if conflicts:
+            logger.info(f"Found {len(conflicts)} manual override conflicts")
+            self.stats['manual_overrides_detected'] = len(conflicts)
+        
+        return conflicts
+    
+    def apply_manual_override(self, group_id: int, new_original_id: int, 
+                            override_type: str = "single_group",
+                            reason: str = "user_preference", 
+                            notes: str = "") -> bool:
+        """Apply a manual override for original selection."""
+        if not self.override_manager:
+            logger.error("Manual override manager not available")
+            return False
+        
+        try:
+            from ops.manual_override import OverrideType, OverrideReason, ManualOverride
+            import time
+            
+            # Validate override type and reason
+            try:
+                override_type_enum = OverrideType(override_type)
+                reason_enum = OverrideReason(reason)
+            except ValueError as e:
+                logger.error(f"Invalid override type or reason: {e}")
+                return False
+            
+            # Get current original for this group
+            with self.db_manager.get_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT file_id FROM group_members 
+                    WHERE group_id = ? AND role = 'original'
+                """, (group_id,))
+                
+                current_original = cursor.fetchone()
+                if not current_original:
+                    logger.error(f"No original found for group {group_id}")
+                    return False
+                
+                auto_original_id = current_original[0]
+                
+                # Verify new original exists in group
+                cursor = conn.execute("""
+                    SELECT file_id FROM group_members 
+                    WHERE group_id = ? AND file_id = ?
+                """, (group_id, new_original_id))
+                
+                if not cursor.fetchone():
+                    logger.error(f"File {new_original_id} not found in group {group_id}")
+                    return False
+            
+            # Create override record
+            override = ManualOverride(
+                id=None,
+                group_id=group_id,
+                original_file_id=new_original_id,
+                auto_original_id=auto_original_id,
+                override_type=override_type_enum,
+                reason=reason_enum,
+                created_at=time.time(),
+                notes=notes
+            )
+            
+            # Record the override
+            override_id = self.override_manager.record_override(override)
+            
+            logger.info(f"Applied manual override {override_id} for group {group_id}: "
+                       f"auto={auto_original_id} -> manual={new_original_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to apply manual override: {e}")
+            return False
+    
+    def remove_manual_override(self, group_id: int) -> bool:
+        """Remove manual override for a group (revert to automatic selection)."""
+        if not self.override_manager:
+            logger.error("Manual override manager not available")
+            return False
+        
+        try:
+            success = self.override_manager.remove_override(group_id)
+            if success:
+                logger.info(f"Removed manual override for group {group_id}")
+            return success
+            
+        except Exception as e:
+            logger.error(f"Failed to remove manual override: {e}")
+            return False
     
     def _original_sort_key(self, file_record: FileRecord):
         """Sort key for original selection: resolution > EXIF time > size > format priority."""
