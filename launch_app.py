@@ -121,9 +121,14 @@ try:
             easter_action.triggered.connect(self.launch_easter_egg)
             easter_action.setVisible(False)  # Hidden by default
             
+            # Developer panel action (hidden)
+            dev_panel_action = toolbar.addAction("� Developer Panel")
+            dev_panel_action.triggered.connect(self.show_developer_panel)
+            dev_panel_action.setVisible(False)  # Hidden by default
+            
             # Developer mode toggle
             dev_action = toolbar.addAction("🔧 Dev Mode")
-            dev_action.triggered.connect(lambda: easter_action.setVisible(not easter_action.isVisible()))
+            dev_action.triggered.connect(lambda: self.toggle_dev_mode(easter_action, dev_panel_action))
             
             return toolbar
         
@@ -161,6 +166,66 @@ try:
             """Launch the easter egg directly (for testing)."""
             print("🎮 Launching PacDupe mini-game directly...")
             show_easter_egg(self)
+        
+        def toggle_dev_mode(self):
+            """Toggle developer mode on/off."""
+            if not hasattr(self, '_dev_mode'):
+                self._dev_mode = False
+            
+            self._dev_mode = not self._dev_mode
+            
+            if self._dev_mode:
+                self.statusBar().showMessage("Developer mode enabled 👨‍💻", 3000)
+                print("🔧 Developer mode: ON")
+                print("💡 Use Ctrl+Shift+D to open Developer Panel")
+            else:
+                self.statusBar().showMessage("Developer mode disabled", 2000)
+                print("🔧 Developer mode: OFF")
+                # Close developer panel if open
+                if hasattr(self, '_developer_panel') and self._developer_panel:
+                    self._developer_panel.close()
+        
+        def show_developer_panel(self):
+            """Show the hidden developer panel."""
+            if not hasattr(self, '_dev_mode') or not self._dev_mode:
+                # Secret access without dev mode for testing
+                self.statusBar().showMessage("🤫 Secret developer access...", 2000)
+            
+            try:
+                from src.ui.developer_panel import DeveloperPanel
+                
+                if not hasattr(self, '_developer_panel') or not self._developer_panel:
+                    self._developer_panel = DeveloperPanel(self)
+                    print("🔧 Developer Panel created")
+                
+                self._developer_panel.show()
+                self._developer_panel.raise_()
+                self._developer_panel.activateWindow()
+                self.statusBar().showMessage("Developer Panel opened 🔧", 3000)
+                
+            except ImportError as e:
+                QMessageBox.warning(self, "Developer Panel", 
+                    f"Could not load developer panel:\n{e}")
+                print(f"❌ Failed to load developer panel: {e}")
+        
+        def keyPressEvent(self, event):
+            """Handle keyboard shortcuts including hidden developer shortcuts."""
+            from PySide6.QtCore import Qt
+            
+            # Hidden developer panel shortcut: Ctrl+Shift+D
+            if (event.modifiers() == (Qt.ControlModifier | Qt.ShiftModifier) and 
+                event.key() == Qt.Key_D):
+                self.show_developer_panel()
+                return
+            
+            # Super secret dev mode toggle: Ctrl+Alt+Shift+M
+            if (event.modifiers() == (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier) and 
+                event.key() == Qt.Key_M):
+                self.toggle_dev_mode()
+                return
+                
+            # Pass to parent for normal handling
+            super().keyPressEvent(event)
         
         def apply_theme(self):
             """Apply dark theme to the application."""
