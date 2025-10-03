@@ -52,10 +52,15 @@ try:
         DeleteManager, DeleteMethod, DeleteConfirmationDialog, 
         DeleteProgressDialog
     )
+    from reports.export_manager import (
+        ReportExporter, ExportFormat, ExportScope, DuplicateRecord,
+        ExportConfigurationDialog, ExportProgressDialog
+    )
     from gui.selection_model import (
         SelectionModel, KeyboardShortcutManager, BulkActionManager,
         FileSelection, GroupSelection
     )
+    from gui.settings_dialog import show_settings_dialog
 except ImportError:
     # Fallback for development
     Settings = None
@@ -64,6 +69,34 @@ except ImportError:
     DiagnosticsPanel = None
     setup_logging = None
     DuplicateGrouper = None
+    DeleteManager = None
+    DeleteMethod = None
+    DeleteConfirmationDialog = None
+    DeleteProgressDialog = None
+    ReportExporter = None
+    
+    # Export-related classes
+    class ExportFormat:
+        CSV = "csv"
+        JSON = "json"
+        BOTH = "both"
+        
+    class ExportScope:
+        CURRENT_VIEW = "current_view"
+        FULL_DATASET = "full_dataset"
+        SELECTED_ONLY = "selected_only"
+        
+    class DuplicateRecord:
+        def __init__(self, *args, **kwargs): pass
+        
+    ExportConfigurationDialog = None
+    ExportProgressDialog = None
+    SelectionModel = None
+    KeyboardShortcutManager = None
+    BulkActionManager = None
+    FileSelection = None
+    GroupSelection = None
+    show_settings_dialog = None
 
 
 @dataclass
@@ -422,6 +455,10 @@ class MainWindow(QMainWindow):
         self.delete_method = DeleteMethod.RECYCLE_BIN  # Default method
         self.setup_delete_manager()
         
+        # Export manager
+        self.export_manager = ReportExporter()
+        self.setup_export_manager()
+        
         self.init_ui()
         self.init_data()
         self.load_sample_data()
@@ -539,8 +576,17 @@ class MainWindow(QMainWindow):
         
         # Export Report
         self.export_action = QAction("📊 Export Report", self)
-        self.export_action.triggered.connect(self.export_report)
+        self.export_action.triggered.connect(self.export_report_advanced)
         toolbar.addAction(self.export_action)
+        
+        # Quick export options
+        self.quick_export_csv_action = QAction("📄 Quick CSV", self)
+        self.quick_export_csv_action.triggered.connect(self.quick_export_csv)
+        toolbar.addAction(self.quick_export_csv_action)
+        
+        self.quick_export_json_action = QAction("📋 Quick JSON", self)
+        self.quick_export_json_action.triggered.connect(self.quick_export_json)
+        toolbar.addAction(self.quick_export_json_action)
         
         toolbar.addSeparator()
         
@@ -829,8 +875,15 @@ class MainWindow(QMainWindow):
             
     def open_settings(self):
         """Handle open settings action."""
-        # TODO: Implement settings dialog
-        QMessageBox.information(self, "Settings", "Settings dialog (Not implemented yet)")
+        if show_settings_dialog:
+            # Show the real settings dialog with the hidden easter egg
+            dialog_result = show_settings_dialog(self)
+            if dialog_result:
+                # Settings were applied
+                self.status_bar.showMessage("Settings updated", 2000)
+        else:
+            # Fallback for when PySide6 is not available
+            QMessageBox.information(self, "Settings", "Settings dialog (PySide6 not available)")
         
     def setup_keyboard_shortcuts(self):
         """Setup keyboard shortcuts for selection operations."""
@@ -1171,6 +1224,255 @@ class MainWindow(QMainWindow):
                     if self.delete_method_combo.itemText(i) == "Recycle Bin":
                         self.delete_method_combo.setItemData(i, False, Qt.UserRole - 1)
                         break
+                        
+    def setup_export_manager(self):
+        """Setup export manager with signal connections."""
+        if not self.export_manager:
+            return
+            
+        # Connect export manager signals
+        self.export_manager.export_started.connect(self.on_export_started)
+        self.export_manager.export_progress.connect(self.on_export_progress)
+        self.export_manager.export_completed.connect(self.on_export_completed)
+        self.export_manager.export_failed.connect(self.on_export_failed)
+        
+    def export_report_advanced(self):
+        """Show advanced export configuration dialog."""
+        if not self.export_manager:
+            QMessageBox.warning(self, "Error", "Export system not available")
+            return
+            
+        # Show configuration dialog
+        config_dialog = ExportConfigurationDialog(self.export_manager, self)
+        
+        if config_dialog.exec() and hasattr(config_dialog, 'accepted'):
+            # Apply field selection
+            config_dialog.apply_field_selection()
+            
+            # Get configuration
+            export_format = config_dialog.get_selected_format()
+            export_scope = config_dialog.get_selected_scope()
+            
+            # Get records based on scope
+            records = self.get_export_records(export_scope)
+            
+            if not records:
+                QMessageBox.information(self, "No Data", "No records available for export")
+                return
+                
+            # Choose file location
+            file_path = self.choose_export_file(export_format)
+            if not file_path:
+                return
+                
+            # Perform export
+            self.perform_export(records, export_format, file_path)
+            
+    def quick_export_csv(self):
+        """Quick export to CSV with current view."""
+        self.quick_export(ExportFormat.CSV)
+        
+    def quick_export_json(self):
+        """Quick export to JSON with current view."""
+        self.quick_export(ExportFormat.JSON)
+        
+    def quick_export(self, format: ExportFormat):
+        """Perform quick export with minimal configuration."""
+        if not self.export_manager:
+            QMessageBox.warning(self, "Error", "Export system not available")
+            return
+            
+        # Get current view records
+        records = self.get_export_records(ExportScope.CURRENT_VIEW)
+        
+        if not records:
+            QMessageBox.information(self, "No Data", "No records in current view to export")
+            return
+            
+        # Choose file location
+        file_path = self.choose_export_file(format)
+        if not file_path:
+            return
+            
+        # Perform export
+        self.perform_export(records, format, file_path)
+        
+    def get_export_records(self, scope: ExportScope) -> List[DuplicateRecord]:
+        """Get records for export based on scope."""
+        records = []
+        
+        if scope == ExportScope.CURRENT_VIEW:
+            # Export currently visible groups/files
+            records = self.create_records_from_current_view()
+            
+        elif scope == ExportScope.FULL_DATASET:
+            # Export all available data
+            records = self.create_records_from_full_dataset()
+            
+        elif scope == ExportScope.SELECTED_ONLY:
+            # Export only selected files
+            records = self.create_records_from_selection()
+            
+        return records
+        
+    def create_records_from_current_view(self) -> List[DuplicateRecord]:
+        """Create export records from currently visible data."""
+        records = []
+        
+        # Use sample data if available, otherwise create demo data
+        if hasattr(self, 'sample_groups') and self.sample_groups:
+            for group in self.sample_groups:
+                group_id = group.get('id', f"group_{len(records)}")
+                files = group.get('files', [])
+                
+                if len(files) < 2:
+                    continue
+                    
+                # Assume first file is original
+                original_file = files[0]
+                
+                for duplicate_file in files[1:]:
+                    record = DuplicateRecord(
+                        group_id=str(group_id),
+                        original_path=original_file.get('path', 'Unknown'),
+                        duplicate_path=duplicate_file.get('path', 'Unknown'),
+                        tag='safe_duplicate' if duplicate_file.get('is_safe_to_delete', False) else 'duplicate',
+                        reason='exact' if duplicate_file.get('similarity', 0) > 99 else 'near',
+                        similarity_score=duplicate_file.get('similarity', 95.0),
+                        file_hash=f"hash_{hash(duplicate_file.get('path', ''))}",
+                        file_size=duplicate_file.get('size', 0),
+                        original_size=original_file.get('size', 0),
+                        exif_match=duplicate_file.get('exif_match', True),
+                        camera_make=duplicate_file.get('camera_make', 'Unknown'),
+                        camera_model=duplicate_file.get('camera_model', 'Unknown'),
+                        resolution=f"{duplicate_file.get('width', 1920)}x{duplicate_file.get('height', 1080)}",
+                        quality_score=duplicate_file.get('quality', 0.8),
+                        action_taken='pending',
+                        confidence_level=0.9
+                    )
+                    records.append(record)
+        else:
+            # Create sample records for demonstration
+            records = self.export_manager.create_sample_records(10)
+            
+        return records
+        
+    def create_records_from_full_dataset(self) -> List[DuplicateRecord]:
+        """Create export records from full dataset."""
+        # For now, same as current view but could include database queries
+        records = self.create_records_from_current_view()
+        
+        # Add additional sample data to simulate full dataset
+        additional_records = self.export_manager.create_sample_records(20)
+        records.extend(additional_records)
+        
+        return records
+        
+    def create_records_from_selection(self) -> List[DuplicateRecord]:
+        """Create export records from selected files only."""
+        records = []
+        
+        if not self.selection_model:
+            return records
+            
+        # Get selected file paths
+        selected_paths = list(self.selection_model.selected_files)
+        selected_ids = self.selection_model.get_selected_file_ids()
+        
+        # Create records for selected files
+        all_records = self.create_records_from_current_view()
+        
+        # Filter to selected files only
+        for record in all_records:
+            if (record.duplicate_path in selected_paths or 
+                record.original_path in selected_paths):
+                records.append(record)
+                
+        return records
+        
+    def choose_export_file(self, format: ExportFormat) -> Optional[str]:
+        """Choose export file location."""
+        if format == ExportFormat.CSV:
+            file_filter = "CSV Files (*.csv);;All Files (*)"
+            default_name = "duplicate_report.csv"
+        elif format == ExportFormat.JSON:
+            file_filter = "JSON Files (*.json);;All Files (*)"
+            default_name = "duplicate_report.json"
+        else:  # BOTH
+            file_filter = "All Files (*)"
+            default_name = "duplicate_report"
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Report", default_name, file_filter
+        )
+        
+        return file_path if file_path else None
+        
+    def perform_export(self, records: List[DuplicateRecord], format: ExportFormat, file_path: str):
+        """Perform the actual export operation."""
+        try:
+            # Show progress dialog
+            self.export_progress_dialog = ExportProgressDialog(self)
+            self.export_progress_dialog.show()
+            
+            # Perform export
+            success = False
+            
+            if format == ExportFormat.CSV:
+                success = self.export_manager.export_to_csv(records, file_path)
+            elif format == ExportFormat.JSON:
+                success = self.export_manager.export_to_json(records, file_path)
+            elif format == ExportFormat.BOTH:
+                # Remove extension for both formats
+                base_path = str(Path(file_path).with_suffix(''))
+                success = self.export_manager.export_both_formats(records, base_path)
+                
+            # Close progress dialog
+            if hasattr(self, 'export_progress_dialog'):
+                self.export_progress_dialog.close()
+                
+            if not success:
+                QMessageBox.warning(self, "Export Failed", "Export operation failed. Check console for details.")
+                
+        except Exception as e:
+            if hasattr(self, 'export_progress_dialog'):
+                self.export_progress_dialog.close()
+            QMessageBox.critical(self, "Export Error", f"Export failed: {str(e)}")
+            
+    def on_export_started(self, total_records: int):
+        """Handle export operation start."""
+        if hasattr(self, 'export_progress_dialog'):
+            self.export_progress_dialog.update_progress(0, total_records)
+            
+    def on_export_progress(self, current: int, description: str):
+        """Handle export progress updates."""
+        if hasattr(self, 'export_progress_dialog'):
+            # Get total from progress bar max
+            total = getattr(self.export_progress_dialog.progress_bar, 'maximum', lambda: current)()
+            self.export_progress_dialog.update_progress(current, total, description)
+            QApplication.processEvents()  # Keep UI responsive
+            
+    def on_export_completed(self, format: str, file_path: str):
+        """Handle export operation completion."""
+        if hasattr(self, 'export_progress_dialog'):
+            self.export_progress_dialog.close()
+            
+        # Show completion message
+        QMessageBox.information(
+            self, "Export Complete",
+            f"Successfully exported data to {format} format:\\n{file_path}"
+        )
+        
+    def on_export_failed(self, error_message: str):
+        """Handle export operation failure."""
+        if hasattr(self, 'export_progress_dialog'):
+            self.export_progress_dialog.close()
+            
+        QMessageBox.critical(self, "Export Failed", f"Export failed: {error_message}")
+        
+    def export_report(self):
+        """Legacy export report method (now redirects to advanced export)."""
+        self.export_report_advanced()
 
 
 def main():
